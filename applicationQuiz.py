@@ -13,6 +13,13 @@ RESET_STYLE = "\x1b[0m"
 BLINK_ON = "\x1b[5m"
 BLINK_OFF = "\x1b[25m"
 
+# The Flash form does not use the viewer's screen height to decide when to
+# start a new choice column.  It wraps at a fixed Y coordinate.  Sixteen
+# terminal rows is the closest match for Page 3 in an 80-column terminal.
+CHOICE_ROWS = max(4, int(os.environ.get("APERTURE_CHOICE_ROWS", "16")))
+CHOICE_COLUMN_GAP = 4
+CHOICE_MIN_COLUMN_WIDTH = 20
+
 
 def ansi_supported():
     """Best-effort ANSI detection, overridable for BBS/telnet setups."""
@@ -197,7 +204,11 @@ def uppercase_input(prompt=""):
 
             # Windows special keys arrive as a two-character sequence.
             if ch in ("\x00", "\xe0"):
-                msvcrt.getwch()
+                special = msvcrt.getwch()
+                if special == "I":
+                    return "PGUP"
+                if special == "Q":
+                    return "PGDN"
                 continue
 
             if ch.isprintable():
@@ -234,6 +245,19 @@ def uppercase_input(prompt=""):
                     raise EOFError
                 continue
 
+            # SyncTERM/xterm-style Page Up and Page Down keys.
+            # Page Up   = ESC [ 5 ~
+            # Page Down = ESC [ 6 ~
+            if ch == "\x1b":
+                second = sys.stdin.read(1)
+                if second == "[":
+                    third = sys.stdin.read(1)
+                    if third in ("5", "6"):
+                        fourth = sys.stdin.read(1)
+                        if fourth == "~":
+                            return "PGUP" if third == "5" else "PGDN"
+                continue
+
             if ch in ("\x08", "\x7f"):
                 if chars:
                     chars.pop()
@@ -262,87 +286,73 @@ def _choice_lines(number, choice, column_width, digits):
     return wrapped.split("\n")
 
 
-def _pack_choice_columns(choices, column_width, rows_per_column, digits):
+def _max_choice_columns(width):
+    """How many readable choice columns fit across this terminal."""
+    return max(
+        1,
+        (width + CHOICE_COLUMN_GAP)
+        // (CHOICE_MIN_COLUMN_WIDTH + CHOICE_COLUMN_GAP),
+    )
+
+
+def display_choices(choices, page=0):
     """
-    Fill each column top-to-bottom before moving right, like the Flash form.
+    Display choices top-to-bottom, then continue in columns to the right.
 
-    Wrapped choices consume however many physical rows they need, so a long
-    choice will not collide with the next choice or the next column.
+    The original Flash code wraps choice fields when their Y coordinate passes
+    500 pixels; it does not use the browser/terminal window height.  For the
+    terminal recreation we map that fixed cutoff to CHOICE_ROWS (16 by
+    default), which gives Page 3 the original 01-16 / 17-25 layout.
+
+    Lists too large for one terminal-width page can be browsed with Page
+    Up/Page Down, mirroring the original form's PGUP/PGDN behavior.
     """
-    columns = [[]]
-
-    for number, choice in enumerate(choices, start=1):
-        lines = _choice_lines(number, choice, column_width, digits)
-
-        if columns[-1] and len(columns[-1]) + len(lines) > rows_per_column:
-            columns.append([])
-
-        columns[-1].extend(lines)
-
-    return columns
-
-
-def display_choices(choices, rows_used=0):
-    """
-    Lay choices out in vertical columns, matching the original Flash form.
-
-    The first column fills downward to the remaining terminal height, then the
-    list continues at the top of the next column.  This is the behavior visible
-    on Page 3 of the original: 01-16 on the left, then 17-25 on the right.
-    """
-    width, height = terminal_size()
+    width = terminal_width()
     digits = max(2, len(str(max(1, len(choices)))))
+    max_columns = _max_choice_columns(width)
+    page_capacity = CHOICE_ROWS * max_columns
+    page_count = max(1, (len(choices) + page_capacity - 1) // page_capacity)
+    page = max(0, min(page, page_count - 1))
 
-    # Leave one row for the blank line before the prompt and one for the prompt.
-    rows_per_column = max(4, height - rows_used - 2)
+    first = page * page_capacity
+    last = min(first + page_capacity, len(choices))
+    page_choices = choices[first:last]
 
-    # Try the smallest number of columns that lets the complete list fit in
-    # the visible area.  Four spaces between columns reproduces the generous
-    # separation of the original while still working on an 80-column BBS.
-    gap = 4
-    min_column_width = digits + 8
-    max_columns = max(1, (width + gap) // (min_column_width + gap))
+    column_count = max(
+        1,
+        min(max_columns, (len(page_choices) + CHOICE_ROWS - 1) // CHOICE_ROWS),
+    )
+    column_width = (
+        width - CHOICE_COLUMN_GAP * (column_count - 1)
+    ) // column_count
 
-    chosen_columns = None
-    chosen_width = None
+    columns = [[] for _ in range(column_count)]
 
-    for column_count in range(1, max_columns + 1):
-        column_width = (width - gap * (column_count - 1)) // column_count
-        if column_width < min_column_width:
-            break
+    for local_index, choice in enumerate(page_choices):
+        global_number = first + local_index + 1
+        column_index = local_index // CHOICE_ROWS
+        lines = _choice_lines(global_number, choice, column_width, digits)
 
-        columns = _pack_choice_columns(
-            choices, column_width, rows_per_column, digits
+        # A wrapped answer can consume more than one physical terminal line.
+        # Keep it with its numbered entry; this may make a column a little
+        # taller than 16 physical rows, but never splits one answer in half.
+        columns[column_index].extend(lines)
+
+    band_height = max(len(column) for column in columns)
+    for row in range(band_height):
+        parts = []
+        for column in columns:
+            cell = column[row] if row < len(column) else ""
+            parts.append(cell.ljust(column_width))
+        print((" " * CHOICE_COLUMN_GAP).join(parts).rstrip())
+
+    if page_count > 1:
+        print()
+        print(
+            "[{} total choices : PGUP/PGDN to navigate]".format(len(choices))
         )
 
-        if len(columns) <= column_count:
-            chosen_columns = columns
-            chosen_width = column_width
-            break
-
-    if chosen_columns is None:
-        # Some lists (especially the enormous animal list) cannot fit on one
-        # terminal screen.  Use the widest practical multi-column layout and
-        # allow normal terminal scrollback for the remainder.
-        column_count = max_columns
-        chosen_width = (width - gap * (column_count - 1)) // column_count
-        chosen_columns = _pack_choice_columns(
-            choices, chosen_width, rows_per_column, digits
-        )
-
-    # If more logical columns were needed than physically fit side-by-side,
-    # print them in successive horizontal bands.
-    for band_start in range(0, len(chosen_columns), max_columns):
-        band = chosen_columns[band_start:band_start + max_columns]
-        band_height = max(len(column) for column in band)
-
-        for row in range(band_height):
-            parts = []
-            for column in band:
-                cell = column[row] if row < len(column) else ""
-                parts.append(cell.ljust(chosen_width))
-            print((" " * gap).join(parts).rstrip())
-
+    return page, page_count
 
 def show_help():
     printer(QuizSource.HELP_RAW, end="")
@@ -362,25 +372,36 @@ def parser(question):
                 continue
             return answer
 
-        rows_used = (
-            rendered_row_count(QuizSource.HEADER, num=question["id"])
-            + rendered_row_count(question["question"] + "^^")
-        )
-        display_choices(question["choices"], rows_used=rows_used)
-        print()
-        answer = uppercase_input("> ").strip()
+        page = 0
+        while True:
+            clear_screen()
+            printer(QuizSource.HEADER, num=question["id"], end="")
+            printer(question["question"] + "^^", end="")
+            page, page_count = display_choices(question["choices"], page=page)
+            print()
+            answer = uppercase_input("> ").strip()
 
-        if answer == "HELP":
-            show_help()
-            continue
+            if answer == "HELP":
+                show_help()
+                break
 
-        try:
-            choice = int(answer)
-        except ValueError:
-            continue
+            if answer == "PGDN":
+                if page + 1 < page_count:
+                    page += 1
+                continue
 
-        if 1 <= choice <= len(question["choices"]):
-            return choice
+            if answer == "PGUP":
+                if page > 0:
+                    page -= 1
+                continue
+
+            try:
+                choice = int(answer)
+            except ValueError:
+                continue
+
+            if 1 <= choice <= len(question["choices"]):
+                return choice
 
 
 def wait_for_continue(text, uid=None):
