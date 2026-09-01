@@ -13,13 +13,6 @@ RESET_STYLE = "\x1b[0m"
 BLINK_ON = "\x1b[5m"
 BLINK_OFF = "\x1b[25m"
 
-# SyncTERM/CTerm can repurpose or disable the legacy blink bit:
-#   ?33h = blink becomes bright background
-#   ?34h = blink selects alternate character set
-#   ?35h = blink disabled
-# Reset all three before using SGR 5 so the UIN actually flashes.
-ENABLE_REAL_BLINK = "\x1b[?33l\x1b[?34l\x1b[?35l"
-
 # The Flash form does not use the viewer's screen height to decide when to
 # start a new choice column.  It wraps at a fixed Y coordinate.  Sixteen
 # terminal rows is the closest match for Page 3 in an 80-column terminal.
@@ -99,13 +92,6 @@ def blink_supported():
     return ansi_supported()
 
 
-def enable_real_blink():
-    """Put SyncTERM/CTerm back into actual-blink mode."""
-    if blink_supported():
-        sys.stdout.write(ENABLE_REAL_BLINK)
-        sys.stdout.flush()
-
-
 def wrap_line(line, width=None, initial_indent="", subsequent_indent=""):
     if width is None:
         width = terminal_width()
@@ -173,7 +159,6 @@ def printer(text, num=None, uid=None, end="\n", blink_uid=True):
     # normally just show the text steadily. Set APERTURE_BLINK=0 to disable it
     # or APERTURE_BLINK=1 to force the escape sequence under a BBS/telnet PTY.
     if uid_marker is not None and blink_uid and blink_supported():
-        enable_real_blink()
         rendered = rendered.replace(
             uid_marker, "{}{}{}".format(BLINK_ON, uid_marker, BLINK_OFF)
         )
@@ -641,16 +626,33 @@ def _static_pages(text, uid=None):
     """
     Split long non-question screens (intro/UIN notice) into terminal pages.
 
-    The SWF strings include their own final "> " prompt.  Strip that prompt
-    from the pageable body and draw a fresh prompt on every page so PGUP/PGDN
-    can be handled without letting the terminal scroll the beginning away.
+    The UIN line is deliberately kept intact.  Before static paging existed,
+    printer() special-cased this line so the complete [UIN] received one SGR
+    blink span; generic wrapping here would split that marker and prevent the
+    blink substitution from matching it.
     """
     uid_marker = None
     if uid is not None:
         uid_marker = "[{}]".format(uid)
         text = text.replace("@", uid_marker)
 
-    lines = _wrapped_swf_lines(text)
+    width = terminal_width()
+    lines = []
+
+    # Interpret the SWF's ^ controls here instead of using _wrapped_swf_lines,
+    # because the UIN needs the same no-wrap treatment printer() gives it.
+    for logical_line in text.replace("^", "\n").split("\n"):
+        if logical_line == "":
+            lines.append("")
+        elif (
+            uid_marker is not None
+            and logical_line.strip() == uid_marker
+        ):
+            lines.append(logical_line)
+        else:
+            lines.extend(
+                wrap_line(logical_line, width=width).split("\n")
+            )
 
     # INTRO_RAW and UIN_NOTICE_RAW both end with a literal "> " line.
     if lines and lines[-1].strip() == ">":
@@ -680,7 +682,6 @@ def _print_static_page(lines, uid_marker=None):
             and uid_marker in line
             and blink_supported()
         ):
-            enable_real_blink()
             line = line.replace(
                 uid_marker,
                 "{}{}{}".format(BLINK_ON, uid_marker, BLINK_OFF),
