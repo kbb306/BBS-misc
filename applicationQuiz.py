@@ -20,8 +20,9 @@ CHOICE_ROWS = max(4, int(os.environ.get("APERTURE_CHOICE_ROWS", "16")))
 CHOICE_COLUMN_GAP = 4
 CHOICE_MIN_COLUMN_WIDTH = 20
 
-# SyncTERM and the server-side PTY do not always agree about screen height.
-# Use a fixed Flash-like viewport for layout, with environment overrides.
+# SyncTERM and the server-side PTY do not always agree about screen geometry.
+# Use a fixed Flash-like 80x25 viewport by default, with environment overrides.
+SCREEN_COLS = max(20, int(os.environ.get("APERTURE_SCREEN_COLS", "80")))
 SCREEN_ROWS = max(12, int(os.environ.get("APERTURE_SCREEN_ROWS", "25")))
 QUESTION_PAGE_ROWS = max(
     4,
@@ -69,9 +70,22 @@ def generate_uin(length=64):
 
 
 def terminal_size():
-    """Return the live terminal size, with a classic 80x24 fallback."""
-    size = shutil.get_terminal_size(fallback=(80, 24))
-    return max(20, size.columns), max(10, size.lines)
+    """
+    Return the layout size used by the quiz.
+
+    Over telnet/BBS connections, shutil.get_terminal_size() sees the
+    server-side PTY, which may not match SyncTERM's visible 80x25 screen.
+    Therefore the recreation uses a fixed virtual screen by default.
+
+    Set APERTURE_USE_PTY_SIZE=1 to opt back into live PTY geometry.
+    """
+    if os.environ.get("APERTURE_USE_PTY_SIZE") == "1":
+        size = shutil.get_terminal_size(
+            fallback=(SCREEN_COLS, SCREEN_ROWS)
+        )
+        return max(20, size.columns), max(10, size.lines)
+
+    return SCREEN_COLS, SCREEN_ROWS
 
 
 def terminal_width():
