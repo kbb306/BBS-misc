@@ -1,4 +1,6 @@
 # Extracted from Aperture.swf (Flash 8 / ActionScript 2)
+from typing import Optional
+
 # Carets (^) are the SWF's line-break control character. The @ in UIN_NOTICE_RAW
 # is replaced at display time by "[" + uid + "]". The SWF obtains uid from
 # gdxt.php?what=getid&refid=...; it does not generate the UIN locally.
@@ -3209,7 +3211,7 @@ QUESTIONS = [
     }
 ]
 
-def render_swf_text(text: str, uid: str | None = None) -> str:
+def render_swf_text(text: str, uid: Optional[str] = None) -> str:
     """Convert the SWF's ^ newlines and optional @ UIN token for terminal use."""
     if uid is not None:
         text = text.replace("@", f"[{uid}]")
