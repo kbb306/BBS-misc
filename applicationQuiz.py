@@ -20,6 +20,15 @@ CHOICE_ROWS = max(4, int(os.environ.get("APERTURE_CHOICE_ROWS", "16")))
 CHOICE_COLUMN_GAP = 4
 CHOICE_MIN_COLUMN_WIDTH = 20
 
+# SyncTERM and the server-side PTY do not always agree about screen height.
+# Use a fixed Flash-like viewport for layout, with environment overrides.
+SCREEN_ROWS = max(12, int(os.environ.get("APERTURE_SCREEN_ROWS", "25")))
+QUESTION_PAGE_ROWS = max(
+    4,
+    int(os.environ.get("APERTURE_QUESTION_ROWS", str(SCREEN_ROWS - 7))),
+)
+MIN_INLINE_CHOICE_ROWS = 6
+
 
 def ansi_supported():
     """Best-effort ANSI detection, overridable for BBS/telnet setups."""
@@ -274,6 +283,45 @@ def uppercase_input(prompt=""):
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
+def _wrapped_swf_lines(text):
+    """Turn SWF ^ breaks and terminal wrapping into physical screen rows."""
+    text = text.replace("^", "\n")
+    width = terminal_width()
+    lines = []
+
+    for logical_line in text.split("\n"):
+        if logical_line == "":
+            lines.append("")
+        else:
+            lines.extend(wrap_line(logical_line, width=width).split("\n"))
+
+    return lines
+
+
+def _question_pages(question):
+    """Split a question body into PGUP/PGDN-sized physical-row pages."""
+    lines = _wrapped_swf_lines(question["question"])
+    if not lines:
+        lines = [""]
+
+    return [
+        lines[i:i + QUESTION_PAGE_ROWS]
+        for i in range(0, len(lines), QUESTION_PAGE_ROWS)
+    ]
+
+
+def _print_question_screen(question, body_lines):
+    """Clear and redraw the form header plus one page of question text."""
+    clear_screen()
+    printer(QuizSource.HEADER, num=question["id"], end="")
+
+    for line in body_lines:
+        print(line)
+
+    # Original form leaves a blank row between the question and its controls.
+    print()
+
+
 def _choice_lines(number, choice, column_width, digits):
     """Format one numbered choice inside a single display column."""
     prefix = "{:0{}d}] ".format(number, digits)
@@ -295,48 +343,78 @@ def _max_choice_columns(width):
     )
 
 
-def display_choices(choices, page=0):
+def _build_choice_pages(choices, rows_per_column):
     """
-    Display choices top-to-bottom, then continue in columns to the right.
+    Pack numbered choices by *physical terminal rows*.
 
-    The original Flash code wraps choice fields when their Y coordinate passes
-    500 pixels; it does not use the browser/terminal window height.  For the
-    terminal recreation we map that fixed cutoff to CHOICE_ROWS (16 by
-    default), which gives Page 3 the original 01-16 / 17-25 layout.
-
-    Lists too large for one terminal-width page can be browsed with Page
-    Up/Page Down, mirroring the original form's PGUP/PGDN behavior.
+    This is important for long answer text: a wrapped answer consumes two or
+    more rows instead of causing the bottom of the screen to scroll away.
     """
     width = terminal_width()
     digits = max(2, len(str(max(1, len(choices)))))
     max_columns = _max_choice_columns(width)
-    page_capacity = CHOICE_ROWS * max_columns
-    page_count = max(1, (len(choices) + page_capacity - 1) // page_capacity)
+
+    # Pack conservatively using the narrowest width a full page could have.
+    # When a page uses fewer columns, rendering only gets wider and therefore
+    # cannot require more wrapped rows than the packing calculation.
+    packing_width = (
+        width - CHOICE_COLUMN_GAP * (max_columns - 1)
+    ) // max_columns
+
+    pages = []
+    columns = [[]]
+    used_rows = 0
+
+    for number, choice in enumerate(choices, start=1):
+        needed = len(_choice_lines(number, choice, packing_width, digits))
+
+        if columns[-1] and used_rows + needed > rows_per_column:
+            if len(columns) >= max_columns:
+                pages.append(columns)
+                columns = [[]]
+            else:
+                columns.append([])
+            used_rows = 0
+
+        columns[-1].append((number, choice))
+        used_rows += needed
+
+    if columns and any(columns):
+        pages.append(columns)
+
+    if not pages:
+        pages = [[[]]]
+
+    return pages, digits
+
+
+def display_choices(choices, page=0, rows_per_column=CHOICE_ROWS):
+    """
+    Display choices top-to-bottom, then continue in columns to the right.
+
+    Pages are packed according to physical rows, so both very long lists and
+    individually long choices remain inside the terminal viewport.
+    """
+    width = terminal_width()
+    rows_per_column = max(4, rows_per_column)
+    pages, digits = _build_choice_pages(choices, rows_per_column)
+    page_count = len(pages)
     page = max(0, min(page, page_count - 1))
 
-    first = page * page_capacity
-    last = min(first + page_capacity, len(choices))
-    page_choices = choices[first:last]
-
-    column_count = max(
-        1,
-        min(max_columns, (len(page_choices) + CHOICE_ROWS - 1) // CHOICE_ROWS),
-    )
+    entries_by_column = pages[page]
+    column_count = max(1, len(entries_by_column))
     column_width = (
         width - CHOICE_COLUMN_GAP * (column_count - 1)
     ) // column_count
 
-    columns = [[] for _ in range(column_count)]
-
-    for local_index, choice in enumerate(page_choices):
-        global_number = first + local_index + 1
-        column_index = local_index // CHOICE_ROWS
-        lines = _choice_lines(global_number, choice, column_width, digits)
-
-        # A wrapped answer can consume more than one physical terminal line.
-        # Keep it with its numbered entry; this may make a column a little
-        # taller than 16 physical rows, but never splits one answer in half.
-        columns[column_index].extend(lines)
+    columns = []
+    for entries in entries_by_column:
+        rendered = []
+        for number, choice in entries:
+            rendered.extend(
+                _choice_lines(number, choice, column_width, digits)
+            )
+        columns.append(rendered)
 
     band_height = max(len(column) for column in columns)
     for row in range(band_height):
@@ -346,13 +424,48 @@ def display_choices(choices, page=0):
             parts.append(cell.ljust(column_width))
         print((" " * CHOICE_COLUMN_GAP).join(parts).rstrip())
 
-    if page_count > 1:
-        print()
-        print(
-            "[{} total choices : PGUP/PGDN to navigate]".format(len(choices))
-        )
-
     return page, page_count
+
+
+def _choice_page_count(choices, rows_per_column):
+    pages, _ = _build_choice_pages(choices, rows_per_column)
+    return len(pages)
+
+
+def _choice_rows_for_body(body_row_count, choices):
+    """
+    Work out how many physical choice rows can coexist with this body page.
+
+    Header, blank separators, navigation hint (when needed), and the input
+    prompt all consume rows too.  If fewer than MIN_INLINE_CHOICE_ROWS remain,
+    the choices are moved to their own PGDN screen.
+    """
+    # Header consumes two rows because HEADER ends in ^^.
+    # Also reserve: one blank after body, one blank before prompt, prompt row.
+    available = SCREEN_ROWS - 2 - body_row_count - 3
+    if available < MIN_INLINE_CHOICE_ROWS:
+        return 0
+
+    rows = min(CHOICE_ROWS, available)
+
+    # A multipage choice list needs one extra row for the navigation hint.
+    if _choice_page_count(choices, rows) > 1:
+        rows -= 1
+
+    if rows < MIN_INLINE_CHOICE_ROWS:
+        return 0
+
+    return rows
+
+
+def _navigation_hint(can_up, can_down):
+    if can_up and can_down:
+        return "[PGUP/PGDN] NAVIGATE"
+    if can_down:
+        return "[PGDN] MORE"
+    if can_up:
+        return "[PGUP] REVIEW"
+    return ""
 
 def show_help():
     printer(QuizSource.HELP_RAW, end="")
@@ -360,49 +473,136 @@ def show_help():
 
 
 def parser(question):
-    while True:
-        clear_screen()
-        printer(QuizSource.HEADER, num=question["id"], end="")
-        printer(question["question"] + "^^", end="")
+    body_pages = _question_pages(question)
+    body_page = 0
 
-        if question["type"] == "T":
-            answer = uppercase_input("> ")
-            if answer == "HELP":
-                show_help()
-                continue
-            return answer
-
-        page = 0
+    # Free-text questions can page through a long body before accepting input.
+    if question["type"] == "T":
         while True:
-            clear_screen()
-            printer(QuizSource.HEADER, num=question["id"], end="")
-            printer(question["question"] + "^^", end="")
-            page, page_count = display_choices(question["choices"], page=page)
-            print()
+            body_lines = body_pages[body_page]
+            _print_question_screen(question, body_lines)
+
+            can_up = body_page > 0
+            can_down = body_page + 1 < len(body_pages)
+            hint = _navigation_hint(can_up, can_down)
+            if hint:
+                print(hint)
+
             answer = uppercase_input("> ").strip()
 
             if answer == "HELP":
                 show_help()
-                break
-
-            if answer == "PGDN":
-                if page + 1 < page_count:
-                    page += 1
                 continue
 
-            if answer == "PGUP":
-                if page > 0:
-                    page -= 1
+            if answer == "PGDN" and can_down:
+                body_page += 1
                 continue
 
-            try:
-                choice = int(answer)
-            except ValueError:
+            if answer == "PGUP" and can_up:
+                body_page -= 1
                 continue
 
-            if 1 <= choice <= len(question["choices"]):
-                return choice
+            # Do not accept an answer until the player has reached the last
+            # page of a paged question body.
+            if can_down:
+                continue
 
+            return answer
+
+    choice_page = 0
+    choices_only = False
+
+    while True:
+        body_lines = body_pages[body_page]
+
+        # All non-final body pages are reading-only pages.
+        if body_page + 1 < len(body_pages):
+            _print_question_screen(question, body_lines)
+            print(_navigation_hint(body_page > 0, True))
+            command = uppercase_input("> ").strip()
+
+            if command == "HELP":
+                show_help()
+                continue
+            if command == "PGDN":
+                body_page += 1
+            elif command == "PGUP" and body_page > 0:
+                body_page -= 1
+            continue
+
+        # On the final body page, show choices inline if enough physical rows
+        # remain.  Otherwise PGDN advances to a choices-only screen.
+        inline_rows = _choice_rows_for_body(
+            len(body_lines), question["choices"]
+        )
+
+        if not choices_only and inline_rows == 0:
+            _print_question_screen(question, body_lines)
+            print(_navigation_hint(body_page > 0, True))
+            command = uppercase_input("> ").strip()
+
+            if command == "HELP":
+                show_help()
+                continue
+            if command == "PGUP" and body_page > 0:
+                body_page -= 1
+            elif command == "PGDN":
+                choices_only = True
+                choice_page = 0
+            continue
+
+        if choices_only:
+            clear_screen()
+            printer(QuizSource.HEADER, num=question["id"], end="")
+            rows_per_column = CHOICE_ROWS
+        else:
+            _print_question_screen(question, body_lines)
+            rows_per_column = inline_rows
+
+        # Reserve a row for the navigation hint if this choice set pages.
+        if _choice_page_count(question["choices"], rows_per_column) > 1:
+            rows_per_column = max(4, rows_per_column - 1)
+
+        choice_page, choice_page_count = display_choices(
+            question["choices"],
+            page=choice_page,
+            rows_per_column=rows_per_column,
+        )
+
+        can_up = choice_page > 0 or choices_only or body_page > 0
+        can_down = choice_page + 1 < choice_page_count
+        hint = _navigation_hint(can_up, can_down)
+        if hint:
+            print(hint)
+
+        print()
+        answer = uppercase_input("> ").strip()
+
+        if answer == "HELP":
+            show_help()
+            continue
+
+        if answer == "PGDN":
+            if choice_page + 1 < choice_page_count:
+                choice_page += 1
+            continue
+
+        if answer == "PGUP":
+            if choice_page > 0:
+                choice_page -= 1
+            elif choices_only:
+                choices_only = False
+            elif body_page > 0:
+                body_page -= 1
+            continue
+
+        try:
+            choice = int(answer)
+        except ValueError:
+            continue
+
+        if 1 <= choice <= len(question["choices"]):
+            return choice
 
 def wait_for_continue(text, uid=None):
     while True:
