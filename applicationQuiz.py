@@ -7,8 +7,35 @@ import textwrap
 
 import QuizSource
 
+# Original Aperture terminal look: green text on a black background.
+SCREEN_STYLE = "\x1b[32;40m"
+RESET_STYLE = "\x1b[0m"
 BLINK_ON = "\x1b[5m"
 BLINK_OFF = "\x1b[25m"
+
+
+def ansi_supported():
+    """Best-effort ANSI detection, overridable for BBS/telnet setups."""
+    override = os.environ.get("APERTURE_COLOR")
+    if override == "1":
+        return True
+    if override == "0":
+        return False
+
+    term = os.environ.get("TERM", "").lower()
+    return sys.stdout.isatty() or term not in ("", "dumb")
+
+
+def set_screen_style():
+    if ansi_supported():
+        sys.stdout.write(SCREEN_STYLE)
+        sys.stdout.flush()
+
+
+def reset_screen_style():
+    if ansi_supported():
+        sys.stdout.write(RESET_STYLE)
+        sys.stdout.flush()
 
 
 def generate_uin(length=64):
@@ -33,9 +60,7 @@ def blink_supported():
         return True
     if override == "0":
         return False
-
-    term = os.environ.get("TERM", "").lower()
-    return sys.stdout.isatty() or term not in ("", "dumb")
+    return ansi_supported()
 
 
 def wrap_line(line, width=None, initial_indent="", subsequent_indent=""):
@@ -62,7 +87,7 @@ def printer(text, num=None, uid=None, end="\n", blink_uid=True):
 
     uid_marker = None
     if uid is not None:
-        uid_marker = f"[{uid}]"
+        uid_marker = "[{}]".format(uid)
         text = text.replace("@", uid_marker)
 
     # In the original SWF, ^ is a custom line-break token.
@@ -87,14 +112,114 @@ def printer(text, num=None, uid=None, end="\n", blink_uid=True):
     # or APERTURE_BLINK=1 to force the escape sequence under a BBS/telnet PTY.
     if uid_marker is not None and blink_uid and blink_supported():
         rendered = rendered.replace(
-            uid_marker, f"{BLINK_ON}{uid_marker}{BLINK_OFF}"
+            uid_marker, "{}{}{}".format(BLINK_ON, uid_marker, BLINK_OFF)
         )
 
     print(rendered, end=end, flush=True)
 
 
 def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
+    if ansi_supported():
+        # ANSI clear + home keeps the program independent of the local shell
+        # and works cleanly over telnet/PTY connections.
+        sys.stdout.write("\x1b[2J\x1b[H")
+        set_screen_style()
+    else:
+        os.system("cls" if os.name == "nt" else "clear")
+
+
+def uppercase_input(prompt=""):
+    """
+    Read input while echoing alphabetic characters in uppercase.
+
+    On a real TTY/PTY (including typical BBS/telnet sessions), characters are
+    uppercased as the player types them. If stdin is not a TTY, the completed
+    line is simply converted to uppercase.
+    """
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    if not sys.stdin.isatty():
+        line = sys.stdin.readline()
+        if line == "":
+            raise EOFError
+        return line.rstrip("\r\n").upper()
+
+    if os.name == "nt":
+        import msvcrt
+
+        chars = []
+        while True:
+            ch = msvcrt.getwch()
+
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\r\n")
+                sys.stdout.flush()
+                return "".join(chars)
+
+            if ch == "\x03":
+                raise KeyboardInterrupt
+
+            if ch in ("\x08", "\x7f"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+
+            # Windows special keys arrive as a two-character sequence.
+            if ch in ("\x00", "\xe0"):
+                msvcrt.getwch()
+                continue
+
+            if ch.isprintable():
+                ch = ch.upper()
+                chars.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
+    # POSIX path: use raw mode so lowercase keystrokes never get echoed before
+    # we have a chance to turn them into uppercase.
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    chars = []
+
+    try:
+        tty.setraw(fd)
+
+        while True:
+            ch = sys.stdin.read(1)
+
+            if ch in ("\r", "\n"):
+                sys.stdout.write("\r\n")
+                sys.stdout.flush()
+                return "".join(chars)
+
+            if ch == "\x03":
+                raise KeyboardInterrupt
+
+            if ch == "\x04":
+                if not chars:
+                    raise EOFError
+                continue
+
+            if ch in ("\x08", "\x7f"):
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+
+            if ch.isprintable():
+                ch = ch.upper()
+                chars.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def display_choices(choices):
@@ -103,7 +228,7 @@ def display_choices(choices):
     digits = max(2, len(str(max(0, len(choices) - 1))))
 
     for i, choice in enumerate(choices):
-        prefix = f"{i:0{digits}d}] "
+        prefix = "{:0{}d}] ".format(i, digits)
         print(
             wrap_line(
                 choice,
@@ -116,7 +241,7 @@ def display_choices(choices):
 
 def show_help():
     printer(QuizSource.HELP_RAW, end="")
-    input()
+    uppercase_input()
 
 
 def parser(question):
@@ -126,17 +251,17 @@ def parser(question):
         printer(question["question"] + "^^", end="")
 
         if question["type"] == "T":
-            answer = input("> ")
-            if answer.lower() == "help":
+            answer = uppercase_input("> ")
+            if answer == "HELP":
                 show_help()
                 continue
             return answer
 
         display_choices(question["choices"])
         print()
-        answer = input("> ").strip()
+        answer = uppercase_input("> ").strip()
 
-        if answer.lower() == "help":
+        if answer == "HELP":
             show_help()
             continue
 
@@ -152,29 +277,34 @@ def parser(question):
 def wait_for_continue(text, uid=None):
     while True:
         printer(text, uid=uid, end="")
-        if input().strip() == "CONTINUE":
+        if uppercase_input().strip() == "CONTINUE":
             return
         clear_screen()
 
 
 def main():
     uid = generate_uin()
-
-    wait_for_continue(QuizSource.INTRO_RAW)
+    set_screen_style()
     clear_screen()
-    wait_for_continue(QuizSource.UIN_NOTICE_RAW, uid=uid)
 
-    for question in QuizSource.QUESTIONS:
-        parser(question)
+    try:
+        wait_for_continue(QuizSource.INTRO_RAW)
+        clear_screen()
+        wait_for_continue(QuizSource.UIN_NOTICE_RAW, uid=uid)
 
-    clear_screen()
-    printer(QuizSource.FINISH_RAW, end="")
-    input()
+        for question in QuizSource.QUESTIONS:
+            parser(question)
 
-    # The SWF deliberately fails this final UIN entry regardless of whether
-    # the player remembered the generated value correctly.
-    clear_screen()
-    printer(QuizSource.FAIL_RAW)
+        clear_screen()
+        printer(QuizSource.FINISH_RAW, end="")
+        uppercase_input()
+
+        # The SWF deliberately fails this final UIN entry regardless of whether
+        # the player remembered the generated value correctly.
+        clear_screen()
+        printer(QuizSource.FAIL_RAW)
+    finally:
+        reset_screen_style()
 
 
 if __name__ == "__main__":
