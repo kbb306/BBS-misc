@@ -225,7 +225,7 @@ def uppercase_input(prompt=""):
 def display_choices(choices):
     """Print numbered choices with hanging-indent wrapping."""
     width = terminal_width()
-    digits = max(2, len(str(max(0, len(choices) - 1))))
+    digits = max(2, len(str(max(1, len(choices)))))
 
     for i, choice in enumerate(choices):
         prefix = "{:0{}d}] ".format(i, digits)
