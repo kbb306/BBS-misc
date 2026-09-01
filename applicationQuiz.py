@@ -4,6 +4,7 @@ import shutil
 import string
 import sys
 import textwrap
+import time
 
 import QuizSource
 
@@ -774,6 +775,7 @@ def main():
         # the player remembered the generated value correctly.
         clear_screen()
         printer(QuizSource.FAIL_RAW)
+        time.sleep(10)
     finally:
         reset_screen_style()
 
