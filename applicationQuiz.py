@@ -499,6 +499,24 @@ def _navigation_hint(can_up, can_down):
         return "[PGUP] REVIEW"
     return ""
 
+
+def _choice_number(answer, choices):
+    """
+    Return a valid global choice number, independent of the current page.
+
+    Paging is only for viewing the list.  A player who already knows the
+    number should never have to visit the page containing that choice first.
+    """
+    try:
+        number = int(answer)
+    except ValueError:
+        return None
+
+    if 1 <= number <= len(choices):
+        return number
+
+    return None
+
 def show_help():
     printer(QuizSource.HELP_RAW, end="")
     uppercase_input()
@@ -576,6 +594,11 @@ def parser(question):
             if command == "HELP":
                 show_help()
                 continue
+
+            selected = _choice_number(command, question["choices"])
+            if selected is not None:
+                return selected
+
             if command == "PGUP" and body_page > 0:
                 body_page -= 1
             elif command == "PGDN":
@@ -614,6 +637,12 @@ def parser(question):
             show_help()
             continue
 
+        # Choice numbers are global, not page-local.  Accept any valid number
+        # immediately even if its row has never been displayed.
+        selected = _choice_number(answer, question["choices"])
+        if selected is not None:
+            return selected
+
         if answer == "PGDN":
             if choice_page + 1 < choice_page_count:
                 choice_page += 1
@@ -627,14 +656,6 @@ def parser(question):
             elif body_page > 0:
                 body_page -= 1
             continue
-
-        try:
-            choice = int(answer)
-        except ValueError:
-            continue
-
-        if 1 <= choice <= len(question["choices"]):
-            return choice
 
 def _static_pages(text, uid=None):
     """
