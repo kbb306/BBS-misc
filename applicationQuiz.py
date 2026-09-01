@@ -48,9 +48,18 @@ def generate_uin(length=64):
             return uid
 
 
+def terminal_size():
+    """Return the live terminal size, with a classic 80x24 fallback."""
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    return max(20, size.columns), max(10, size.lines)
+
+
 def terminal_width():
-    """Use the live terminal width when available; fall back to classic 80 columns."""
-    return max(20, shutil.get_terminal_size(fallback=(80, 24)).columns)
+    return terminal_size()[0]
+
+
+def terminal_height():
+    return terminal_size()[1]
 
 
 def blink_supported():
@@ -78,6 +87,25 @@ def wrap_line(line, width=None, initial_indent="", subsequent_indent=""):
         break_long_words=True,
         break_on_hyphens=False,
     )
+
+
+def rendered_row_count(text, num=None):
+    """Count terminal rows advanced by printer() for ordinary SWF text."""
+    if num is not None:
+        text = text.replace("#", str(num))
+
+    text = text.replace("^", "\n")
+    width = terminal_width()
+    rendered_lines = []
+
+    for line in text.split("\n"):
+        if line == "> ":
+            rendered_lines.append(line)
+        else:
+            rendered_lines.append(wrap_line(line, width=width))
+
+    # printer(..., end="") advances once for every newline in the rendered text.
+    return "\n".join(rendered_lines).count("\n")
 
 
 def printer(text, num=None, uid=None, end="\n", blink_uid=True):
@@ -222,21 +250,98 @@ def uppercase_input(prompt=""):
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def display_choices(choices):
-    """Print numbered choices with hanging-indent wrapping."""
-    width = terminal_width()
-    digits = max(2, len(str(max(0, len(choices)-1))))
+def _choice_lines(number, choice, column_width, digits):
+    """Format one numbered choice inside a single display column."""
+    prefix = "{:0{}d}] ".format(number, digits)
+    wrapped = wrap_line(
+        choice,
+        width=column_width,
+        initial_indent=prefix,
+        subsequent_indent=" " * len(prefix),
+    )
+    return wrapped.split("\n")
 
-    for i, choice in enumerate(choices,start=1):
-        prefix = "{:0{}d}] ".format(i, digits)
-        print(
-            wrap_line(
-                choice,
-                width=width,
-                initial_indent=prefix,
-                subsequent_indent=" " * len(prefix),
-            )
+
+def _pack_choice_columns(choices, column_width, rows_per_column, digits):
+    """
+    Fill each column top-to-bottom before moving right, like the Flash form.
+
+    Wrapped choices consume however many physical rows they need, so a long
+    choice will not collide with the next choice or the next column.
+    """
+    columns = [[]]
+
+    for number, choice in enumerate(choices, start=1):
+        lines = _choice_lines(number, choice, column_width, digits)
+
+        if columns[-1] and len(columns[-1]) + len(lines) > rows_per_column:
+            columns.append([])
+
+        columns[-1].extend(lines)
+
+    return columns
+
+
+def display_choices(choices, rows_used=0):
+    """
+    Lay choices out in vertical columns, matching the original Flash form.
+
+    The first column fills downward to the remaining terminal height, then the
+    list continues at the top of the next column.  This is the behavior visible
+    on Page 3 of the original: 01-16 on the left, then 17-25 on the right.
+    """
+    width, height = terminal_size()
+    digits = max(2, len(str(max(1, len(choices)))))
+
+    # Leave one row for the blank line before the prompt and one for the prompt.
+    rows_per_column = max(4, height - rows_used - 2)
+
+    # Try the smallest number of columns that lets the complete list fit in
+    # the visible area.  Four spaces between columns reproduces the generous
+    # separation of the original while still working on an 80-column BBS.
+    gap = 4
+    min_column_width = digits + 8
+    max_columns = max(1, (width + gap) // (min_column_width + gap))
+
+    chosen_columns = None
+    chosen_width = None
+
+    for column_count in range(1, max_columns + 1):
+        column_width = (width - gap * (column_count - 1)) // column_count
+        if column_width < min_column_width:
+            break
+
+        columns = _pack_choice_columns(
+            choices, column_width, rows_per_column, digits
         )
+
+        if len(columns) <= column_count:
+            chosen_columns = columns
+            chosen_width = column_width
+            break
+
+    if chosen_columns is None:
+        # Some lists (especially the enormous animal list) cannot fit on one
+        # terminal screen.  Use the widest practical multi-column layout and
+        # allow normal terminal scrollback for the remainder.
+        column_count = max_columns
+        chosen_width = (width - gap * (column_count - 1)) // column_count
+        chosen_columns = _pack_choice_columns(
+            choices, chosen_width, rows_per_column, digits
+        )
+
+    # If more logical columns were needed than physically fit side-by-side,
+    # print them in successive horizontal bands.
+    for band_start in range(0, len(chosen_columns), max_columns):
+        band = chosen_columns[band_start:band_start + max_columns]
+        band_height = max(len(column) for column in band)
+
+        for row in range(band_height):
+            parts = []
+            for column in band:
+                cell = column[row] if row < len(column) else ""
+                parts.append(cell.ljust(chosen_width))
+            print((" " * gap).join(parts).rstrip())
 
 
 def show_help():
@@ -257,7 +362,11 @@ def parser(question):
                 continue
             return answer
 
-        display_choices(question["choices"])
+        rows_used = (
+            rendered_row_count(QuizSource.HEADER, num=question["id"])
+            + rendered_row_count(question["question"] + "^^")
+        )
+        display_choices(question["choices"], rows_used=rows_used)
         print()
         answer = uppercase_input("> ").strip()
 
@@ -270,7 +379,7 @@ def parser(question):
         except ValueError:
             continue
 
-        if 0 <= choice <= len(question["choices"]):
+        if 1 <= choice <= len(question["choices"]):
             return choice
 
 
