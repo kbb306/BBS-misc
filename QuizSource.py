@@ -13,6 +13,8 @@ FAIL_RAW = 'The entered UIN(+L) does not match your assigned UIN(+L).^^Please RE
 
 HELP_RAW = 'If this is an actual plea for help in response to a hazardous material spill, an explosion, a fire on your person, radiation poisoning, a choking gas of unknown origin, eye trauma resulting from the use of an emergency eye wash station on floors three, four, or eleven, an animal malfunction, or any other injurious experimental equipment failure, please remain at your workstation. A Crisis Response Team has already been mobilized to deliberate on a response to your crisis.^^If you need help accessing the system, please refer to your User Handbook.^^> '
 
+HEADER = 'Form FORMS-EN-2873-FORM - PAGE #^^'
+
 FINAL_EASTER_EGG = "THECAKEISALIE"
 FINAL_UIN_CHECK_IS_FORCED_FAILURE = True
 
