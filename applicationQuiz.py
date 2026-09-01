@@ -254,13 +254,27 @@ def uppercase_input(prompt=""):
                     raise EOFError
                 continue
 
-            # SyncTERM/xterm-style Page Up and Page Down keys.
-            # Page Up   = ESC [ 5 ~
-            # Page Down = ESC [ 6 ~
+            # Page Up/Page Down sequences.
+            #
+            # SyncTERM:
+            #   Page Up   = ESC [ V
+            #   Page Down = ESC [ U
+            #
+            # xterm-compatible terminals:
+            #   Page Up   = ESC [ 5 ~
+            #   Page Down = ESC [ 6 ~
             if ch == "\x1b":
                 second = sys.stdin.read(1)
                 if second == "[":
                     third = sys.stdin.read(1)
+
+                    # Native SyncTERM sequences.
+                    if third == "V":
+                        return "PGUP"
+                    if third == "U":
+                        return "PGDN"
+
+                    # Common xterm/VT-style sequences.
                     if third in ("5", "6"):
                         fourth = sys.stdin.read(1)
                         if fourth == "~":
