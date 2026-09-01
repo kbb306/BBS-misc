@@ -28,6 +28,10 @@ QUESTION_PAGE_ROWS = max(
     int(os.environ.get("APERTURE_QUESTION_ROWS", str(SCREEN_ROWS - 7))),
 )
 MIN_INLINE_CHOICE_ROWS = 6
+STATIC_PAGE_ROWS = max(
+    4,
+    int(os.environ.get("APERTURE_STATIC_ROWS", str(SCREEN_ROWS - 4))),
+)
 
 
 def ansi_supported():
@@ -618,12 +622,83 @@ def parser(question):
         if 1 <= choice <= len(question["choices"]):
             return choice
 
+def _static_pages(text, uid=None):
+    """
+    Split long non-question screens (intro/UIN notice) into terminal pages.
+
+    The SWF strings include their own final "> " prompt.  Strip that prompt
+    from the pageable body and draw a fresh prompt on every page so PGUP/PGDN
+    can be handled without letting the terminal scroll the beginning away.
+    """
+    uid_marker = None
+    if uid is not None:
+        uid_marker = "[{}]".format(uid)
+        text = text.replace("@", uid_marker)
+
+    lines = _wrapped_swf_lines(text)
+
+    # INTRO_RAW and UIN_NOTICE_RAW both end with a literal "> " line.
+    if lines and lines[-1].strip() == ">":
+        lines.pop()
+
+    # Trim only surplus blank rows at the very end; preserve internal spacing.
+    while lines and lines[-1] == "":
+        lines.pop()
+
+    if not lines:
+        lines = [""]
+
+    pages = [
+        lines[i:i + STATIC_PAGE_ROWS]
+        for i in range(0, len(lines), STATIC_PAGE_ROWS)
+    ]
+
+    return pages, uid_marker
+
+
+def _print_static_page(lines, uid_marker=None):
+    clear_screen()
+
+    for line in lines:
+        if (
+            uid_marker is not None
+            and uid_marker in line
+            and blink_supported()
+        ):
+            line = line.replace(
+                uid_marker,
+                "{}{}{}".format(BLINK_ON, uid_marker, BLINK_OFF),
+            )
+        print(line)
+
+
 def wait_for_continue(text, uid=None):
+    pages, uid_marker = _static_pages(text, uid=uid)
+    page = 0
+
     while True:
-        printer(text, uid=uid, end="")
-        if uppercase_input().strip() == "CONTINUE":
+        _print_static_page(pages[page], uid_marker=uid_marker)
+
+        can_up = page > 0
+        can_down = page + 1 < len(pages)
+        hint = _navigation_hint(can_up, can_down)
+        if hint:
+            print(hint)
+
+        answer = uppercase_input("> ").strip()
+
+        if answer == "PGDN" and can_down:
+            page += 1
+            continue
+
+        if answer == "PGUP" and can_up:
+            page -= 1
+            continue
+
+        # Force the user to reach the final page before CONTINUE is accepted.
+        # This also keeps the first half of the disclaimer reviewable with PGUP.
+        if answer == "CONTINUE" and not can_down:
             return
-        clear_screen()
 
 
 def main():
